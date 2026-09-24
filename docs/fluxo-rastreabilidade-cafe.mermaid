@@ -1,0 +1,104 @@
+flowchart TD
+    subgraph EDGE["CAMPO / EDGE"]
+        direction TB
+        ESP["ESP32 secagem<br/>temp / UR / umidade grao"]
+        BUF[("Buffer LittleFS<br/>store-and-forward")]
+        RTC["RTC DS3231<br/>ts_ocorrencia"]
+        PE["Photo-eye<br/>trigger"]
+        RDR["Portal UHF Gen2<br/>4 antenas circulares"]
+        DDP{{"Dedup glimpse 500ms<br/>1 evento por passagem"}}
+        BLE["BLE NimBLE<br/>contingencia sem rede"]
+    end
+
+    subgraph OPER["OPERADOR"]
+        direction TB
+        QR["Scan QR / NFC<br/>device_id"]
+        HH["Handheld UHF<br/>ensacamento"]
+        MAN["Eventos manuais<br/>revolvimento / transferencia"]
+        CONC["Tela de conciliacao"]
+    end
+
+    subgraph TRANS["TRANSPORTE"]
+        direction TB
+        MQTT["Broker MQTT 5 / TLS 8883<br/>cert por device"]
+        BR["Bridge consumidor"]
+        HTTPS["HTTPS / JWT"]
+    end
+
+    subgraph BACK["BACKEND"]
+        direction TB
+        API["API - unico ponto de escrita"]
+        IDEM{"idem_key ja existe?"}
+        FSM{"Estado do lote permite?"}
+        SIG{"HMAC + nonce + exp validos?"}
+    end
+
+    subgraph DB["PERSISTENCIA"]
+        direction TB
+        PG[("Postgres<br/>lote / saca / device / evento<br/>append-only + hash chain")]
+        TS[("TimescaleDB<br/>telemetria")]
+    end
+
+    EPCIS["Export GS1 EPCIS 2.0<br/>Object / Aggregation / Transformation"]
+
+    %% telemetria
+    RTC --> ESP
+    ESP --> BUF
+    BUF -->|"online"| MQTT
+    ESP -.->|"offline: retem"| BUF
+
+    %% rfid
+    PE -->|"abre janela"| RDR
+    RDR --> DDP
+    DDP -->|"presente >=3 leituras<br/>rssi > -65dBm"| MQTT
+
+    %% ingestao
+    MQTT --> BR
+    BR --> API
+
+    %% operador
+    QR --> HTTPS
+    HH --> HTTPS
+    MAN --> HTTPS
+    CONC --> HTTPS
+    HTTPS --> API
+
+    %% validacoes
+    API --> IDEM
+    IDEM -->|"sim"| DUP["200 - retorna evento existente"]
+    IDEM -->|"nao"| FSM
+    FSM -->|"nao"| REJ["409 - transicao invalida"]
+    FSM -->|"sim"| TIPO{"Origem do evento"}
+
+    TIPO -->|"SENSOR"| TS
+    TIPO -->|"RFID portal"| PROP["evento status=PROPOSTO"]
+    TIPO -->|"APP / BLE"| CONF["evento status=CONFIRMADO<br/>com user_id"]
+
+    PROP --> CONC
+    CONC -->|"operador confirma ou ajusta"| CONF
+    CONF --> PG
+
+    %% comando de volta
+    CONF -->|"SET_LOTE"| CMD["PUBLISH retained<br/>cafe/+/+/device_id/cmd"]
+    CMD --> MQTT
+    MQTT --> ESP
+    ESP -->|"ack + seq"| ACK{"ack em 30s?"}
+    ACK -->|"nao"| PEND["marca vinculo PENDENTE"]
+    ACK -->|"sim"| OK["vinculo ativo"]
+
+    %% ble
+    BLE --> SIG
+    SIG -->|"nao"| DROP["descarta"]
+    SIG -->|"sim"| API
+
+    PG --> EPCIS
+
+    classDef edge fill:#1f4e3d,stroke:#0d2b21,color:#fff
+    classDef guard fill:#7a4a00,stroke:#3d2500,color:#fff
+    classDef store fill:#1b3a5c,stroke:#0d1e2e,color:#fff
+    classDef bad fill:#6b1f1f,stroke:#3a1010,color:#fff
+
+    class ESP,RDR,DDP,PE,BUF,RTC,BLE edge
+    class IDEM,FSM,SIG,ACK,TIPO guard
+    class PG,TS store
+    class REJ,DROP,PEND bad

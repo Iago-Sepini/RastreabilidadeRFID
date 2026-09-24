@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coffee Trace · Rastreabilidade do Café</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"></script>
+<style>
+  :root {
+    --azul: #2563EB; --azul-escuro: #1D4ED8; --azul-claro: #EFF6FF;
+    --verde: #16A34A; --verde-escuro: #15803D;
+    --vermelho: #DC2626; --ambar: #D97706;
+    --lateral: #161E2B; --lateral-texto: #C7CDD8;
+    --texto: #111827; --apagado: #6B7280; --borda: #E5E7EB;
+    --cinza: #F9FAFB; --branco: #FFFFFF;
+    --sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font: 400 15px/1.5 var(--sans); color: var(--texto); background: var(--branco);
+    display: grid; grid-template-columns: 264px minmax(0, 1fr); min-height: 100%;
+  }
+  button, input, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--azul); outline-offset: 2px; }
+
+  /* barra lateral */
+  .lateral {
+    background: var(--lateral); color: var(--lateral-texto);
+    display: flex; flex-direction: column; padding: 20px 14px; gap: 22px;
+    position: sticky; top: 0; height: 100vh;
+  }
+  .marca { display: flex; align-items: center; gap: 10px; padding: 4px 8px; }
+  .marca svg { flex: none; }
+  .marca b { color: #fff; font-size: 20px; font-weight: 700; letter-spacing: -.01em; }
+  .marca span { display: block; font-size: 12px; color: #8B93A3; font-weight: 400; }
+  .menu { display: grid; gap: 2px; }
+  .menu a, .menu .inerte {
+    display: flex; align-items: center; gap: 11px; padding: 10px 12px; border-radius: 8px;
+    font-size: 14px; font-weight: 500; color: var(--lateral-texto); text-decoration: none;
+  }
+  .menu .inerte { color: #7C8798; cursor: default; }
+  .menu a[aria-current="page"] { background: var(--azul); color: #fff; }
+  .menu svg { flex: none; opacity: .85; }
+  .usuario-lateral {
+    margin-top: auto; display: flex; align-items: center; gap: 10px;
+    padding: 12px 8px 4px; border-top: 1px solid #253046;
+  }
+  .avatar {
+    width: 34px; height: 34px; border-radius: 50%; flex: none; background: var(--azul);
+    color: #fff; display: grid; place-items: center; font-weight: 600; font-size: 14px;
+  }
+  .usuario-lateral b { color: #fff; font-size: 14px; font-weight: 600; display: block; }
+  .usuario-lateral span { font-size: 12px; color: #8B93A3; }
+
+  /* topo */
+  .topo {
+    display: flex; align-items: center; gap: 16px; padding: 12px 28px;
+    border-bottom: 1px solid var(--borda); position: sticky; top: 0;
+    background: var(--branco); z-index: 5;
+  }
+  .busca { position: relative; flex: 0 1 320px; }
+  .busca input {
+    width: 100%; padding: 9px 12px 9px 36px; border: 1px solid var(--borda);
+    border-radius: 8px; background: var(--branco);
+  }
+  .busca svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--apagado); }
+  .topo-direita { margin-left: auto; display: flex; align-items: center; gap: 18px; }
+  .pilula {
+    display: inline-flex; align-items: center; gap: 8px; padding: 6px 13px;
+    border-radius: 999px; border: 1px solid var(--borda); font-size: 13px; font-weight: 500;
+  }
+  .ponto { width: 9px; height: 9px; border-radius: 50%; background: #D1D5DB; flex: none; }
+  .ponto.ok { background: var(--verde); }
+  .ponto.espera { background: var(--ambar); }
+  .ponto.erro { background: var(--vermelho); }
+  .sino { position: relative; display: grid; place-items: center; }
+  .sino b {
+    position: absolute; top: -6px; right: -8px; min-width: 18px; height: 18px; padding: 0 5px;
+    border-radius: 9px; background: var(--vermelho); color: #fff; font-size: 11px;
+    font-weight: 600; display: grid; place-items: center;
+  }
+  .usuario-topo { display: flex; align-items: center; gap: 10px; }
+  .usuario-topo b { font-size: 14px; font-weight: 600; display: block; }
+  .usuario-topo span { font-size: 12px; color: var(--apagado); }
+
+  /* conteúdo */
+  main { padding: 26px 28px 56px; }
+  .cabecalho { display: flex; flex-wrap: wrap; align-items: start; gap: 14px; margin-bottom: 18px; }
+  h1 { font-size: 28px; font-weight: 700; letter-spacing: -.02em; margin: 0 0 4px; }
+  .resumo { color: var(--apagado); margin: 0; font-size: 15px; }
+  .resumo em { font-style: normal; color: #9CA3AF; font-size: 14px; }
+  .acoes { margin-left: auto; display: flex; flex-wrap: wrap; gap: 10px; }
+  .botao {
+    display: inline-flex; align-items: center; gap: 7px; padding: 10px 16px;
+    border: 1px solid transparent; border-radius: 8px; font-size: 14px;
+    font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  .botao.azul { background: var(--azul); color: #fff; }
+  .botao.azul:hover { background: var(--azul-escuro); }
+  .botao.verde { background: var(--verde); color: #fff; }
+  .botao.verde:hover { background: var(--verde-escuro); }
+
+  .filtros { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+  .filtros .busca-larga { position: relative; flex: 1 1 340px; }
+  .filtros .busca-larga input {
+    width: 100%; padding: 10px 12px 10px 36px; border: 1px solid var(--borda);
+    border-radius: 8px; background: var(--branco);
+  }
+  .filtros .busca-larga svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--apagado); }
+  .filtros select {
+    flex: 1 1 190px; padding: 10px 12px; border: 1px solid var(--borda);
+    border-radius: 8px; background: var(--branco); color: var(--texto); min-width: 160px;
+  }
+
+  .aviso {
+    margin: 0 0 18px; padding: 13px 16px; border-radius: 10px; background: #FEF2F2;
+    border: 1px solid #FECACA; color: #991B1B; max-width: 80ch;
+  }
+  .aviso code {
+    font-family: var(--mono); font-size: 13px; background: #FEE2E2;
+    padding: 1px 5px; border-radius: 4px;
+  }
+
+  .quadro { border: 1px solid var(--borda); border-radius: 10px; overflow: hidden; }
+  .rolagem { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  thead th {
+    background: var(--branco); text-align: left; white-space: nowrap; font-size: 12px;
+    font-weight: 600; color: var(--apagado); letter-spacing: .03em;
+    padding: 12px 12px; border-bottom: 1px solid var(--borda);
+  }
+  tbody td { padding: 11px 12px; border-bottom: 1px solid #F3F4F6; white-space: nowrap; vertical-align: middle; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tr.lote-grande td { background: #F5F8FF; }
+  td.codigo { font-family: var(--mono); font-weight: 600; color: var(--azul); letter-spacing: .02em; font-size: 13px; }
+  td.codigo .chevron { color: var(--apagado); margin-right: 6px; }
+  td.local small { display: block; color: var(--apagado); font-size: 12px; font-family: var(--mono); }
+  td.encolhe { max-width: 145px; overflow: hidden; text-overflow: ellipsis; }
+  td.centro { text-align: center; }
+  .sim { color: var(--verde); font-weight: 700; }
+  .nao { color: var(--vermelho); font-weight: 700; }
+  td.vinculo a { color: var(--azul); text-decoration: none; font-size: 13px; }
+  td.tag { font-family: var(--mono); font-size: 13px; }
+  .vinculados { color: var(--apagado); font-size: 13px; }
+  tr.recente td { background: var(--azul-claro); }
+  tr.recente td:first-child { box-shadow: inset 3px 0 0 var(--azul); }
+  .lixeira {
+    border: 0; border-radius: 6px; background: var(--vermelho); color: #fff;
+    width: 30px; height: 28px; display: grid; place-items: center; cursor: pointer;
+  }
+  .lixeira:hover { background: #B91C1C; }
+  .sem-linhas td { color: var(--apagado); padding: 26px 16px; text-align: center; white-space: normal; }
+  .rodape { margin-top: 14px; color: var(--apagado); font-size: 13px; }
+  .rodape code { font-family: var(--mono); font-size: 12px; }
+
+  @media (max-width: 900px) {
+    body { grid-template-columns: 1fr; }
+    .lateral { position: static; height: auto; flex-direction: row; align-items: center; padding: 12px 16px; }
+    .lateral .menu, .lateral .usuario-lateral { display: none; }
+    .topo { padding: 12px 16px; }
+    .usuario-topo { display: none; }
+    main { padding: 20px 16px 48px; }
+  }
+</style>
+</head>
+<body>
+
+<aside class="lateral">
+  <div class="marca">
+    <svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true">
+      <circle cx="15" cy="15" r="14" fill="#6B4A32"/>
+      <path d="M15 6c4 3.5 4 14.5 0 18-4-3.5-4-14.5 0-18z" fill="#F3E3D3"/>
+    </svg>
+    <div><b>Coffee Trace</b><span>Sistema de Rastreabilidade</span></div>
+  </div>
+
+  <nav class="menu" aria-label="Seções">
+    <a href="#" aria-current="page"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 8h12v5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V8Z"/><path d="M16 9h2a2.5 2.5 0 0 1 0 5h-2"/></svg>Rastreabilidade</a>
+    <span class="inerte"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>Processos</span>
+    <span class="inerte"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 4 4 19h16L12 4Z"/></svg>Métodos Colheita</span>
+    <span class="inerte"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5c3 3 3 11 0 14-3-3-3-11 0-14Z"/></svg>Variedades</span>
+    <span class="inerte"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 20c-2-2-2-4 0-6s2-4 0-6"/><path d="M14 20c-2-2-2-4 0-6s2-4 0-6"/></svg>Métodos Secagem</span>
+    <span class="inerte"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="7" width="18" height="12" rx="2"/><path d="M8 7V5h8v2"/></svg>Compradores</span>
+    <span class="inerte"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 9h14l-1.5 10h-11L5 9Z"/><path d="M9 9V6h6v3"/></svg>Exportações VIO</span>
+    <span class="inerte"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="3.4"/><path d="M5 20c1.5-3.6 4-5.4 7-5.4s5.5 1.8 7 5.4"/></svg>Funcionários</span>
+  </nav>
+
+  <div class="usuario-lateral">
+    <span class="avatar">U</span>
+    <div><b>Usuário Admin</b><span>Administrador</span></div>
+  </div>
+</aside>
+
+<div>
+  <header class="topo">
+    <div class="busca">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+      <input id="busca-topo" placeholder="Buscar..." aria-label="Buscar" spellcheck="false">
+    </div>
+    <div class="topo-direita">
+      <span class="pilula" role="status" aria-live="polite" title="Conexão com o broker MQTT">
+        <span class="ponto" id="ponto"></span><span id="estado-texto">Conectando...</span>
+      </span>
+      <span class="sino" title="Leituras recebidas nesta sessão">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 9a6 6 0 1 1 12 0c0 4 1.2 5.3 2 6H4c.8-.7 2-2 2-6Z"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>
+        <b id="badge" hidden>0</b>
+      </span>
+      <span class="usuario-topo">
+        <span class="avatar">U</span>
+        <span><b>Usuário Admin</b><span>Administrador</span></span>
+      </span>
+    </div>
+  </header>
+
+  <main>
+    <div class="cabecalho">
+      <div>
+        <h1>Rastreabilidade do Café</h1>
+        <p class="resumo" id="contagem"></p>
+      </div>
+      <div class="acoes">
+        <button class="botao azul" id="btn-amostra" type="button">+ Nova Amostra</button>
+        <button class="botao verde" id="btn-lote" type="button">+ Criar Lote Grande</button>
+      </div>
+    </div>
+
+    <div class="filtros">
+      <div class="busca-larga">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+        <input id="busca" placeholder="Buscar por MTP, lote grande, fazenda, local, tag..." aria-label="Buscar registros" spellcheck="false">
+      </div>
+      <select id="f-local" aria-label="Local"><option value="">Local</option></select>
+      <select id="f-variedade" aria-label="Variedade"><option value="">Variedade</option></select>
+      <select id="f-processo" aria-label="Processo"><option value="">Processo</option></select>
+      <select id="f-colheita" aria-label="Colheita"><option value="">Colheita</option></select>
+      <select id="f-secagem" aria-label="Secagem"><option value="">Secagem</option></select>
+    </div>
+
+    <p class="aviso" id="aviso" hidden></p>
+
+    <div class="quadro">
+      <div class="rolagem">
+        <table>
+          <thead>
+            <tr>
+              <th>CÓDIGO</th><th>FAZ.</th><th>LOCAL</th><th>PROCESSO</th><th>VARIEDADE</th>
+              <th>COLHEITA</th><th>LAV</th><th>DES</th><th>SECAGEM</th><th>N°</th>
+              <th>LOTE GRANDE</th><th>TAG</th><th>LIDA</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="tabela"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <p class="rodape" id="rodape"></p>
+  </main>
+</div>
+
+<script>
+/* ============================================================
+   CONFIGURAÇÃO — tudo aqui, nada na tela.
+   ============================================================ */
+const CONFIG = {
+  // HiveMQ Cloud:      wss://SEU-CLUSTER.s1.eu.hivemq.cloud:8884/mqtt
+  // HiveMQ público:    ws://broker.hivemq.com:8000/mqtt
+  // Mosquitto local:   ws://localhost:9001
+  broker: "wss://c115e6f71aae4b3eae2d554b93ea0250.s1.eu.hivemq.cloud:8884/mqtt",
+
+  // Credencial de Access Management do cluster. PREENCHA estas duas linhas.
+  usuario: "Alisson",
+  senha: "Alisson_111",
+
+  // Mesmo TOPICO_BASE do firmware do ESP32.
+  topicoBase: "cafe/teste/leitor",
+
+  // Lotes grandes que já existem quando a tela abre.
+  lotesIniciais: 5,
+};
+
+/* Catálogos usados para simular a amostra que a tag representa.
+   Os números são os que entram no código MTP. */
+const LOCAIS = [
+  { codigo: "Igr2.13", nome: "Igrejinha II",  fazenda: "IGR", talhao: "IGR 2. 13 (3)" },
+  { codigo: "Igr1.07", nome: "Igrejinha I",   fazenda: "IGR", talhao: "IGR 1. 07 (2)" },
+  { codigo: "Lag1.04", nome: "Lagoa",         fazenda: "LAG", talhao: "LAG 1. 04 (1)" },
+  { codigo: "Ped3.09", nome: "Pedreira",      fazenda: "PED", talhao: "PED 3. 09 (4)" },
+  { codigo: "Cor2.02", nome: "Córrego Fundo", fazenda: "COR", talhao: "COR 2. 02 (2)" },
+];
+const PROCESSOS = [
+  { n: 9, nome: "Vulcão / Volcanic Fermentation" },
+  { n: 8, nome: "Fermentação Espontânea / Aeróbica" },
+  { n: 1, nome: "Natural" },
+  { n: 2, nome: "Honey" },
+  { n: 3, nome: "Despolpado" },
+];
+const VARIEDADES = [
+  { n: 1, nome: "Catucaí 2SL" }, { n: 2, nome: "Mundo Novo" },
+  { n: 3, nome: "Bourbon Amarelo" }, { n: 4, nome: "Catuaí 144" }, { n: 5, nome: "Arara" },
+];
+const COLHEITAS = [{ n: 1, nome: "Manual" }, { n: 2, nome: "Mecanizada" }, { n: 3, nome: "Derriça" }];
+const SECAGENS = [
+  { n: 6, nome: "Seco no Pátio + CoolSeed" }, { n: 2, nome: "Seco em Camas Suspensas" },
+  { n: 4, nome: "Secador Rotativo" }, { n: 1, nome: "Terreiro" },
+];
+
+/* ============================================================ */
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const MAX_AMOSTRAS = 200;
+
+  let cliente = null;
+  let timerSemResposta = null;
+  let jaConectou = false;
+  let ultimoErro = null;
+  let seqSimulador = 0;
+  let totalLeituras = 0;
+  const amostras = new Map();   // uid -> amostra
+  const lotes = [];             // LOTE-GRANDE-00N
+  let ultimoUid = null;
+
+  // ---------- simulação: a tag define a amostra ----------
+  function hash(txt) {
+    let h = 2166136261;
+    for (let i = 0; i < txt.length; i++) { h ^= txt.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    return h;
+  }
+  const escolhe = (lista, h, desloc) => lista[(h >>> desloc) % lista.length];
+
+  function amostraDaTag(uid) {
+    const h = hash(uid);
+    const local = escolhe(LOCAIS, h, 0);
+    const processo = escolhe(PROCESSOS, h, 4);
+    const variedade = escolhe(VARIEDADES, h, 8);
+    const colheita = escolhe(COLHEITAS, h, 12);
+    const secagem = escolhe(SECAGENS, h, 16);
+    const lavado = ((h >>> 20) & 1) === 1;
+    const descascado = ((h >>> 21) & 1) === 1;
+    const numero = ((h >>> 22) % 9) + 1;
+    const mtp = [local.codigo, processo.n, colheita.n, lavado ? 1 : 0, descascado ? 1 : 0, secagem.n, numero].join(".");
+    return { uid, local, processo, variedade, colheita, secagem, lavado, descascado, numero, mtp,
+             lote: lotes.length ? lotes[lotes.length - 1] : null, lida: new Date(), leituras: 1 };
+  }
+
+  // ---------- conexão ----------
+  function estado(tipo, texto) {
+    $("ponto").className = "ponto " + (tipo || "");
+    $("estado-texto").textContent = texto;
+  }
+  function aviso(html) {
+    const el = $("aviso");
+    if (!html) { el.hidden = true; el.textContent = ""; return; }
+    el.innerHTML = html;   // só texto nosso, nunca conteúdo vindo do broker
+    el.hidden = false;
+  }
+  const escapa = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  function conectar() {
+    const url = CONFIG.broker;
+    if (typeof mqtt === "undefined") {
+      estado("erro", "Sem biblioteca MQTT");
+      aviso("A biblioteca MQTT não carregou. Esta tela busca <code>mqtt.min.js</code> na internet; confira a conexão do computador.");
+      return;
+    }
+    if (location.protocol === "https:" && url.startsWith("ws://")) {
+      aviso("A página está em HTTPS e o broker em <code>ws://</code>. O navegador bloqueia essa mistura. Abra o arquivo direto do disco ou use <code>wss://</code>.");
+    }
+
+    if (/hivemq\.cloud/i.test(url) && (!CONFIG.usuario || !CONFIG.senha)) {
+      estado("erro", "Falta credencial");
+      aviso("A HiveMQ Cloud não aceita conexão anônima e <code>CONFIG.usuario</code> ou <code>CONFIG.senha</code> está vazio. " +
+            "Preencha as duas linhas no início do script desta página com a credencial de <b>Access Management &gt; Credentials</b> do cluster.");
+      return;
+    }
+
+    estado("espera", "Conectando...");
+    cliente = mqtt.connect(url, {
+      clientId: "coffeetrace-" + Math.random().toString(16).slice(2, 8),
+      username: CONFIG.usuario || undefined,
+      password: CONFIG.senha || undefined,
+      reconnectPeriod: 2000,
+      connectTimeout: 5000,
+      clean: true,
+    });
+
+    timerSemResposta = setTimeout(() => {
+      if (!cliente || cliente.connected) return;
+      if (ultimoErro) {
+        estado("erro", "Recusado pelo broker");
+        aviso("O broker respondeu: <code>" + escapa(ultimoErro) + "</code>. " +
+              "Se fala em autorização, o problema é <code>CONFIG.usuario</code> ou <code>CONFIG.senha</code> " +
+              "(credencial de Access Management do cluster, não o login do site).");
+        return;
+      }
+      let texto = "Sem resposta de <code>" + escapa(url) + "</code>. Ajuste <code>CONFIG.broker</code> no código desta página. ";
+      if (/hivemq/i.test(url) && !/\/mqtt\/?$/.test(url)) texto += "Nos brokers da HiveMQ a URL termina em <code>/mqtt</code>. ";
+      texto += "O endereço precisa ser WebSocket: <code>wss://…:8884/mqtt</code> na HiveMQ Cloud, " +
+               "<code>ws://broker.hivemq.com:8000/mqtt</code> no público, <code>ws://localhost:9001</code> no Mosquitto. " +
+               "As portas 1883 e 8883 não servem no navegador. " +
+               "Se o endereço está certo, abra o console do navegador (F12) e veja o erro de rede: " +
+               "pode ser firewall ou proxy bloqueando a porta 8884.";
+      aviso(texto);
+      estado("erro", "Broker sem resposta");
+    }, 6000);
+
+    cliente.on("connect", () => {
+      clearTimeout(timerSemResposta);
+      jaConectou = true;
+      aviso(null);
+      estado("ok", "Leitor conectado");
+      cliente.subscribe(CONFIG.topicoBase + "/+/leitura", { qos: 0 }, (err) => {
+        if (err) aviso("O broker recusou a inscrição em <code>" + escapa(CONFIG.topicoBase) + "/+/leitura</code>. Confira as permissões da credencial.");
+      });
+    });
+    cliente.on("reconnect", () => estado("espera", jaConectou ? "Reconectando..." : "Conectando..."));
+    cliente.on("offline", () => estado("erro", "Leitor sem conexão"));
+    cliente.on("error", (e) => {
+      const msg = e && e.message ? e.message : "desconhecido";
+      ultimoErro = msg;
+      console.error("[mqtt]", msg);
+      estado("erro", "Erro de conexão");
+      if (/auth|Not authorized|Bad username/i.test(msg)) {
+        aviso("O broker recusou usuário ou senha. Ajuste <code>CONFIG.usuario</code> e <code>CONFIG.senha</code>. Na HiveMQ Cloud a credencial é a de Access Management, não a do login do site.");
+      }
+    });
+    cliente.on("message", (topico, buffer) => {
+      if (!topico.endsWith("/leitura")) return;
+      let dados = null;
+      try { dados = JSON.parse(buffer.toString()); } catch (_) { return; }
+      if (!dados || !dados.uid) return;
+      registraLeitura(String(dados.uid).toUpperCase());
+    });
+  }
+
+  // ---------- leitura de tag ----------
+  function registraLeitura(uid) {
+    totalLeituras++;
+    ultimoUid = uid;
+    if (amostras.has(uid)) {                 // mesma tag: atualiza, não duplica
+      const a = amostras.get(uid);
+      a.lida = new Date();
+      a.leituras++;
+    } else {
+      amostras.set(uid, amostraDaTag(uid));
+      if (amostras.size > MAX_AMOSTRAS) amostras.delete(amostras.keys().next().value);
+    }
+    desenha();
+  }
+
+  // ---------- desenho ----------
+  const hora = (d) => d.toLocaleTimeString("pt-BR", { hour12: false });
+  const agrupa = (uid) => uid.match(/.{1,2}/g).join(" ");
+
+  function preencheFiltros() {
+    const carrega = (id, itens, rotulo) => {
+      const sel = $(id);
+      itens.forEach((it) => {
+        const op = document.createElement("option");
+        op.value = it; op.textContent = it;
+        sel.appendChild(op);
+      });
+      sel.addEventListener("change", desenha);
+      sel.firstElementChild.textContent = rotulo;
+    };
+    carrega("f-local", LOCAIS.map((l) => l.nome), "Local");
+    carrega("f-variedade", VARIEDADES.map((v) => v.nome), "Variedade");
+    carrega("f-processo", PROCESSOS.map((p) => p.nome), "Processo");
+    carrega("f-colheita", COLHEITAS.map((c) => c.nome), "Colheita");
+    carrega("f-secagem", SECAGENS.map((s) => s.nome), "Secagem");
+  }
+
+  function passaNoFiltro(a) {
+    const termo = ($("busca").value + " " + $("busca-topo").value).trim().toLowerCase();
+    if (termo) {
+      const alvo = [a.mtp, a.uid, a.local.nome, a.local.talhao, a.processo.nome,
+                    a.variedade.nome, a.lote || ""].join(" ").toLowerCase();
+      if (!alvo.includes(termo)) return false;
+    }
+    if ($("f-local").value && a.local.nome !== $("f-local").value) return false;
+    if ($("f-variedade").value && a.variedade.nome !== $("f-variedade").value) return false;
+    if ($("f-processo").value && a.processo.nome !== $("f-processo").value) return false;
+    if ($("f-colheita").value && a.colheita.nome !== $("f-colheita").value) return false;
+    if ($("f-secagem").value && a.secagem.nome !== $("f-secagem").value) return false;
+    return true;
+  }
+
+  function celula(tr, texto, classe) {
+    const td = document.createElement("td");
+    if (classe) td.className = classe;
+    td.textContent = texto;
+    tr.appendChild(td);
+    return td;
+  }
+
+  function desenha() {
+    const corpo = $("tabela");
+    corpo.textContent = "";
+
+    const visiveis = [...amostras.values()]
+      .filter(passaNoFiltro)
+      .sort((a, b) => b.lida - a.lida);
+
+    // lotes grandes, como no sistema
+    lotes.forEach((nome) => {
+      const vinculados = visiveis.filter((a) => a.lote === nome).length;
+      const tr = document.createElement("tr");
+      tr.className = "lote-grande";
+      const td = document.createElement("td");
+      td.className = "codigo";
+      const ch = document.createElement("span");
+      ch.className = "chevron";
+      ch.textContent = "‹";
+      td.append(ch, document.createTextNode(nome));
+      tr.appendChild(td);
+
+      const tdInfo = document.createElement("td");
+      tdInfo.colSpan = 12;
+      tdInfo.className = "vinculados";
+      tdInfo.textContent = vinculados + (vinculados === 1 ? " mini-lote vinculado" : " mini-lotes vinculados");
+      tr.appendChild(tdInfo);
+
+      const tdAcao = document.createElement("td");
+      const botao = document.createElement("button");
+      botao.className = "lixeira";
+      botao.type = "button";
+      botao.title = "Remover " + nome;
+      botao.setAttribute("aria-label", "Remover " + nome);
+      botao.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>';
+      botao.addEventListener("click", () => {
+        lotes.splice(lotes.indexOf(nome), 1);
+        amostras.forEach((a) => { if (a.lote === nome) a.lote = null; });
+        desenha();
+      });
+      tdAcao.appendChild(botao);
+      tr.appendChild(tdAcao);
+      corpo.appendChild(tr);
+    });
+
+    // amostras criadas pelas leituras de tag
+    visiveis.forEach((a) => {
+      const tr = document.createElement("tr");
+      if (a.uid === ultimoUid) tr.className = "recente";
+      celula(tr, a.mtp, "codigo");
+      celula(tr, a.local.talhao);
+      const tdLocal = celula(tr, a.local.nome, "local");
+      const pequeno = document.createElement("small");
+      pequeno.textContent = a.local.codigo;
+      tdLocal.appendChild(pequeno);
+      celula(tr, a.processo.nome, "encolhe");
+      celula(tr, a.variedade.nome, "encolhe");
+      celula(tr, a.colheita.nome);
+      celula(tr, a.lavado ? "✓" : "✗", "centro " + (a.lavado ? "sim" : "nao"));
+      celula(tr, a.descascado ? "✓" : "✗", "centro " + (a.descascado ? "sim" : "nao"));
+      celula(tr, a.secagem.nome, "encolhe");
+      celula(tr, a.numero, "centro");
+      const tdLote = celula(tr, "", "vinculo");
+      if (a.lote) {
+        const link = document.createElement("a");
+        link.href = "#";
+        link.textContent = a.lote;
+        tdLote.appendChild(link);
+      } else {
+        tdLote.textContent = "—";
+      }
+      celula(tr, agrupa(a.uid), "tag");
+      celula(tr, hora(a.lida) + (a.leituras > 1 ? " (" + a.leituras + "x)" : ""));
+      celula(tr, "");
+      corpo.appendChild(tr);
+    });
+
+    if (!lotes.length && !visiveis.length) {
+      const tr = document.createElement("tr");
+      tr.className = "sem-linhas";
+      const td = document.createElement("td");
+      td.colSpan = 14;
+      td.textContent = amostras.size
+        ? "Nenhum registro combina com os filtros."
+        : "Nenhum registro ainda. Passe uma tag no leitor para criar a primeira amostra.";
+      tr.appendChild(td);
+      corpo.appendChild(tr);
+    }
+
+    const totalRegistros = lotes.length + visiveis.length;
+    $("contagem").textContent = "";
+    const em = document.createElement("em");
+    em.textContent = "(" + lotes.length + (lotes.length === 1 ? " lote grande" : " lotes grandes") + ", " +
+                     visiveis.length + (visiveis.length === 1 ? " mini-lote" : " mini-lotes") + ")";
+    $("contagem").append(
+      document.createTextNode(totalRegistros + (totalRegistros === 1 ? " registro encontrado " : " registros encontrados ")),
+      em
+    );
+
+    const badge = $("badge");
+    badge.hidden = totalLeituras === 0;
+    badge.textContent = totalLeituras > 99 ? "99+" : String(totalLeituras);
+
+    $("rodape").textContent = totalLeituras === 0
+      ? "Cada tag lida vira um mini-lote. Local, processo, variedade, colheita e secagem são simulados a partir do código da tag."
+      : totalLeituras + (totalLeituras === 1 ? " leitura recebida" : " leituras recebidas") +
+        " em " + CONFIG.topicoBase + "/+/leitura. A mesma tag atualiza o registro em vez de criar outro.";
+  }
+
+  // ---------- botões da tela ----------
+  $("btn-amostra").addEventListener("click", () => {
+    // Publica uma leitura de teste no broker: o caminho é o mesmo do ESP32.
+    const uid = Array.from(crypto.getRandomValues(new Uint8Array(4)))
+      .map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+    const payload = JSON.stringify({
+      device_id: "simulador", uid, tipo: "simulada",
+      ts: Math.floor(Date.now() / 1000), seq: ++seqSimulador, rssi_wifi: 0,
+    });
+    if (cliente && cliente.connected) {
+      cliente.publish(CONFIG.topicoBase + "/simulador/leitura", payload);
+    } else {
+      registraLeitura(uid);   // sem broker, cria direto para a tela não travar
+    }
+  });
+
+  $("btn-lote").addEventListener("click", () => {
+    const proximo = "LOTE-GRANDE-" + String(lotes.length + 1).padStart(3, "0");
+    lotes.push(proximo);
+    desenha();
+  });
+
+  $("busca").addEventListener("input", desenha);
+  $("busca-topo").addEventListener("input", desenha);
+
+  // ---------- início ----------
+  for (let i = 1; i <= CONFIG.lotesIniciais; i++) lotes.push("LOTE-GRANDE-" + String(i).padStart(3, "0"));
+  preencheFiltros();
+  desenha();
+  conectar();
+})();
+</script>
+</body>
+</html>
