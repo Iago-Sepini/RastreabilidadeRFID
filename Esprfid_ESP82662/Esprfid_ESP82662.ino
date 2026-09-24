@@ -4,6 +4,7 @@
   Bibliotecas (Arduino IDE > Gerenciador de Bibliotecas):
     - MFRC522       (GithubCommunity)
     - PubSubClient  (Nick O'Leary)
+    - WiFiManager   (tzapu)
   Placa: "NodeMCU 1.0 (ESP-12E Module)"
 
   Ligacoes MFRC522 -> ESP8266 (NodeMCU)   (alimente em 3V3, nunca em 5V)
@@ -16,21 +17,29 @@
     3.3V   -> 3V3
     IRQ    -> nao usado
 
+  Buzzer -> D0 (GPIO16):
+    - Bip triplo agudo: entrou em modo de configuracao de WiFi
+    - Bip duplo curto: WiFi conectado com sucesso
+    - Som de sucesso/erro: resultado do envio MQTT apos leitura do RFID
+
   Topicos publicados:
     <TOPICO_BASE>/<device_id>/leitura   uma mensagem por passagem de tag
     <TOPICO_BASE>/<device_id>/status    retained; "offline" via Last Will
+
+  WiFi: nao precisa mais editar SSID/senha no codigo. Se o ESP nao
+  conseguir conectar em nenhuma rede salva, ele mesmo cria uma rede
+  chamada "ESP8266-RFID" — conecte o celular nela e configure a rede
+  do lugar novo pela pagina que abre (ou acesse 192.168.4.1).
 */
 
 #include <ESP8266WiFi.h>
+#include <WiFiManager.h>
 #include <PubSubClient.h>
 #include <SPI.h>
 #include <MFRC522.h>
 #include <time.h>
 
 // ================= CONFIGURACAO =================
-const char* WIFI_SSID  = "Iago";
-const char* WIFI_SENHA = "jurema10";
-
 // --- Qual broker? -------------------------------------------------
 //   1 = HiveMQ Cloud   (TLS na 8883 + usuario e senha)
 //   0 = broker.hivemq.com publico, ou Mosquitto na sua rede (1883, sem login)
@@ -73,9 +82,9 @@ COLE_AQUI_O_CONTEUDO_DO_isrgrootx1.pem
 const char* TOPICO_BASE = "cafe/teste/leitor";
 const char* FW_VERSAO   = "0.1.0";
 
-#define PINO_SS   D8   // GPIO15
-#define PINO_RST  D3   // GPIO0
-#define PINO_LED  D0   // GPIO16 - LED indicador (pode trocar por outro pino livre)
+#define PINO_SS      D8   // GPIO15
+#define PINO_RST     D3   // GPIO0
+#define PINO_BUZZER  D0   // GPIO16 - buzzer ativo
 
 // Mesma tag dentro desta janela = mesma passagem, nao publica de novo
 const unsigned long JANELA_REPETICAO_MS = 2000;
@@ -83,6 +92,7 @@ const unsigned long JANELA_REPETICAO_MS = 2000;
 
 MFRC522      rfid(PINO_SS, PINO_RST);
 PubSubClient mqtt(wifiCliente);
+WiFiManager  wm;
 
 String deviceId;
 String topicoLeitura;
@@ -132,10 +142,43 @@ String uidHex(const MFRC522::Uid& uid) {
   return s;
 }
 
-void piscaLed() {
-  digitalWrite(PINO_LED, HIGH);
-  delay(60);
-  digitalWrite(PINO_LED, LOW);
+void bipSucesso() {
+  tone(PINO_BUZZER, 2600, 100);
+  delay(120);
+  tone(PINO_BUZZER, 3000, 150);
+}
+
+void bipErro() {
+  tone(PINO_BUZZER, 220, 200);
+  delay(250);
+  tone(PINO_BUZZER, 147, 300);
+  delay(300);
+  noTone(PINO_BUZZER);
+}
+
+// Toca quando o ESP entra no modo "portal de configuracao" de WiFi,
+// esperando alguem configurar pelo celular
+void bipModoConfig() {
+  for (int i = 0; i < 3; i++) {
+    tone(PINO_BUZZER, 1500, 100);
+    delay(150);
+  }
+  noTone(PINO_BUZZER);
+}
+
+// Toca quando conecta no WiFi com sucesso (rede salva ou recem configurada)
+void bipWifiConectado() {
+  tone(PINO_BUZZER, 1800, 80);
+  delay(120);
+  tone(PINO_BUZZER, 2200, 120);
+  delay(150);
+  noTone(PINO_BUZZER);
+}
+
+// Callback do WiFiManager: chamado assim que o portal de configuracao abre
+void aoEntrarModoConfig(WiFiManager* wifiManager) {
+  Serial.println("[wifi] entrou em modo de configuracao, conecte-se a rede ESP8266-RFID");
+  bipModoConfig();
 }
 
 bool relogioSincronizado() {
@@ -180,9 +223,21 @@ void conectaMqtt() {
 
 void setup() {
   Serial.begin(115200);
-  pinMode(PINO_LED, OUTPUT);
+  pinMode(PINO_BUZZER, OUTPUT);
 
-  WiFi.mode(WIFI_STA);
+  wm.setAPCallback(aoEntrarModoConfig);
+  // Se ficar 3 minutos no portal sem ninguem configurar, desiste e reinicia
+  wm.setConfigPortalTimeout(180);
+
+  bool conectou = wm.autoConnect("ESP8266-RFID");
+  if (!conectou) {
+    Serial.println("Nao conectou e o portal de configuracao expirou, reiniciando...");
+    ESP.restart();
+  }
+
+  Serial.println("[wifi] conectado!");
+  bipWifiConectado();
+
   String mac = WiFi.macAddress();  // "24:6F:28:A1:B2:C3"
   mac.replace(":", "");
   mac.toLowerCase();
@@ -190,9 +245,6 @@ void setup() {
   topicoLeitura = String(TOPICO_BASE) + "/" + deviceId + "/leitura";
   topicoStatus  = String(TOPICO_BASE) + "/" + deviceId + "/status";
   Serial.printf("\ndevice_id: %s\n", deviceId.c_str());
-
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_SENHA);
 
   configTime(0, 0, "a.st1.ntp.br", "pool.ntp.org");  // UTC
 
@@ -252,7 +304,20 @@ void loop() {
   Serial.print("Tipo: ");
   Serial.println(tipo);
   Serial.println("========================");
-  piscaLed();
-  enfileira(payload);
+
+  bool enviouAgora = false;
+  if (mqtt.connected()) {
+    enviouAgora = mqtt.publish(topicoLeitura.c_str(), payload);
+  }
+
+  if (enviouAgora) {
+    Serial.println("[mqtt] enviado na hora, tocando som de sucesso");
+    bipSucesso();
+  } else {
+    Serial.println("[mqtt] nao foi possivel enviar agora, tocando som de erro");
+    enfileira(payload);
+    bipErro();
+  }
+
   drenaFila();
 }
