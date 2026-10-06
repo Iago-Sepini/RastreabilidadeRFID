@@ -7,23 +7,23 @@
     - WiFiManager   (tzapu)
   Placa: "NodeMCU 1.0 (ESP-12E Module)"
 
-  Ligacoes MFRC522 -> ESP8266 (NodeMCU)   (alimente em 3V3, nunca em 5V)
-    SDA/SS -> D8  (GPIO15)
+  Ligacoes MFRC522 -> ESP8266 (NodeMCU)    (alimente em 3V3, nunca em 5V)
+    SDA/SS -> D2  (GPIO4)  <- alterado de D8 para D2 para nao travar o boot
     SCK    -> D5  (GPIO14)
     MOSI   -> D7  (GPIO13)
     MISO   -> D6  (GPIO12)
-    RST    -> D3  (GPIO0)
+    RST    -> D4  (GPIO2)  <- alterado de D3 para D4 para nao travar o boot
     GND    -> GND
     3.3V   -> 3V3
     IRQ    -> nao usado
 
-  Buzzer -> D0 (GPIO16):
+  Buzzer -> D1 (GPIO5):
     - Bip triplo agudo: entrou em modo de configuracao de WiFi
     - Bip duplo curto: WiFi conectado com sucesso
     - Som de sucesso/erro: resultado do envio MQTT apos leitura do RFID
 
   Topicos publicados:
-    <TOPICO_BASE>/<device_id>/leitura   uma mensagem por passagem de tag
+    <TOPICO_BASE>/<device_id>/leitura    uma mensagem por passagem de tag
     <TOPICO_BASE>/<device_id>/status    retained; "offline" via Last Will
 
   WiFi: nao precisa mais editar SSID/senha no codigo. Se o ESP nao
@@ -55,7 +55,7 @@
   const char*    MQTT_SENHA   = "Alisson_111";
 
   // 1 = valida o certificado do servidor (precisa colar a raiz abaixo)
-  // 0 = so cifra, sem verificar com quem esta falando. Aceitavel em bancada.
+  // 0 = so cifra, sem verificar com quem esta falando. Aceitabel em bancada.
   #define VALIDA_CERTIFICADO 0
 
   // Raiz que assina o certificado da HiveMQ Cloud: ISRG Root X1 (Let's Encrypt).
@@ -82,9 +82,9 @@ COLE_AQUI_O_CONTEUDO_DO_isrgrootx1.pem
 const char* TOPICO_BASE = "cafe/teste/leitor";
 const char* FW_VERSAO   = "0.1.0";
 
-#define PINO_SS      D8   // GPIO15
-#define PINO_RST     D3   // GPIO0
-#define PINO_BUZZER  D0   // GPIO16 - buzzer ativo
+#define PINO_SS      D2   // GPIO4 (Corrigido para evitar travamento de boot no D8)
+#define PINO_RST     D4   // GPIO2 (Corrigido para evitar travamento de boot no D3)
+#define PINO_BUZZER  D1   // GPIO5 (No NodeMCU D1 e o GPIO5)
 
 // Mesma tag dentro desta janela = mesma passagem, nao publica de novo
 const unsigned long JANELA_REPETICAO_MS = 2000;
@@ -208,7 +208,7 @@ void conectaMqtt() {
                          "{\"estado\":\"offline\"}");
   if (!ok) {
     // -2 = nao alcancou o broker (host, porta, firewall, ou CA errada no TLS)
-    //  4 = usuario ou senha recusados      5 = nao autorizado
+    //  4 = usuario ou senha recusados     5 = nao autorizado
     Serial.printf("[mqtt] falhou, rc=%d\n", mqtt.state());
     return;
   }
@@ -224,6 +224,10 @@ void conectaMqtt() {
 void setup() {
   Serial.begin(115200);
   pinMode(PINO_BUZZER, OUTPUT);
+
+  digitalWrite(PINO_BUZZER, HIGH);
+  delay(80);
+  digitalWrite(PINO_BUZZER, LOW);
 
   wm.setAPCallback(aoEntrarModoConfig);
   // Se ficar 3 minutos no portal sem ninguem configurar, desiste e reinicia
