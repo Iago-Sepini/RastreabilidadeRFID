@@ -1,5 +1,5 @@
 /*
-  Leitor RFID de teste: ESP8266 (NodeMCU) + MFRC522 -> broker MQTT
+  Leitor RFID: ESP8266 (NodeMCU) + MFRC522 -> HiveMQ Cloud (MQTT com TLS)
 
   Bibliotecas (Arduino IDE > Gerenciador de Bibliotecas):
     - MFRC522       (GithubCommunity)
@@ -7,7 +7,7 @@
     - WiFiManager   (tzapu)
   Placa: "NodeMCU 1.0 (ESP-12E Module)"
 
-  Ligacoes MFRC522 -> ESP8266 (NodeMCU)    (alimente em 3V3, nunca em 5V)
+  Ligacoes MFRC522 -> ESP8266 (NodeMCU)   (alimente em 3V3, nunca em 5V)
     SDA/SS -> D2  (GPIO4)
     SCK    -> D5  (GPIO14)
     MOSI   -> D7  (GPIO13)
@@ -18,93 +18,58 @@
     IRQ    -> nao usado
 
   Buzzer -> D1 (GPIO5):
-    - Bip triplo agudo: entrou em modo de configuracao de WiFi
-    - Bip duplo curto: WiFi conectado com sucesso
-    - Arpejo de 3 notas: MQTT conectado (primeira vez ou reconexao)
-    - Som de sucesso/erro: resultado do envio MQTT apos leitura do RFID
+    - 3 bips agudos curtos : modo de configuracao de WiFi (portal aberto)
+    - 2 notas subindo      : WiFi conectado
+    - arpejo de 3 notas    : MQTT conectado (primeira vez ou reconexao)
+    - 2 notas agudas       : leitura enviada ao MQTT
+    - 2 notas graves       : leitura NAO enviada (fica na fila e sai quando reconectar)
+
+  ANTENA DO RFID PULSADA: com a antena do MFRC522 sempre ligada o WiFi do
+  ESP8266 degrada (RSSI cai ~8 dB e o DNS/TCP deixam de funcionar). Por isso
+  a antena so liga durante a leitura (~35 ms a cada 250 ms). Um cartao e
+  detectado em ate ~0,25 s. Para comparar, ANTENA_PULSADA 0 = sempre ligada.
+
+  WiFi: sem SSID/senha no codigo. Se nao conseguir conectar em nenhuma rede
+  salva, o ESP cria a rede "ESP8266-RFID": conecte o celular nela e escolha a
+  rede do lugar (ou acesse 192.168.4.1).
 
   Topicos publicados:
-    <TOPICO_BASE>/<device_id>/leitura    uma mensagem por passagem de tag
+    <TOPICO_BASE>/<device_id>/leitura   uma mensagem por passagem de tag
     <TOPICO_BASE>/<device_id>/status    retained; "offline" via Last Will
-
-  WiFi: nao precisa mais editar SSID/senha no codigo. Se o ESP nao
-  conseguir conectar em nenhuma rede salva, ele mesmo cria uma rede
-  chamada "ESP8266-RFID" — conecte o celular nela e configure a rede
-  do lugar novo pela pagina que abre (ou acesse 192.168.4.1).
-
-  CORRECOES DE MEMORIA E VELOCIDADE (v0.3.0):
-    1. wifiCliente.setBufferSizes(1024, 512) reduz os buffers do TLS
-       (BearSSL) de ~32KB (padrao) para ~1.5KB, liberando muita RAM.
-    2. WiFiManager e local a conectaWifiInicial(), liberando RAM apos
-       conectar no WiFi.
-    3. sessaoTls guarda a sessao TLS entre reconexoes: depois da
-       primeira conexao bem-sucedida, reconexoes seguintes pulam boa
-       parte do handshake completo e ficam bem mais rapidas.
-    4. Logs de diagnostico (heap livre + RSSI) antes de cada tentativa
-       de conexao MQTT.
 */
 
 #include <ESP8266WiFi.h>
 #include <WiFiManager.h>
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <SPI.h>
 #include <MFRC522.h>
 #include <time.h>
 
 // ================= CONFIGURACAO =================
-// --- Qual broker? -------------------------------------------------
-//   1 = HiveMQ Cloud   (TLS na 8883 + usuario e senha)
-//   0 = broker.hivemq.com publico, ou Mosquitto na sua rede (1883, sem login)
-#define HIVEMQ_CLOUD 1
+const char*    MQTT_HOST    = "c115e6f71aae4b3eae2d554b93ea0250.s1.eu.hivemq.cloud";
+const uint16_t MQTT_PORTA   = 8883;
+const char*    MQTT_USUARIO = "Alisson";
+const char*    MQTT_SENHA   = "Alisson_111";
 
-#if HIVEMQ_CLOUD
-  #include <WiFiClientSecure.h>
-  // Endereco do cluster, no painel da HiveMQ Cloud (sem "https://")
-  const char*    MQTT_HOST    = "c115e6f71aae4b3eae2d554b93ea0250.s1.eu.hivemq.cloud";
-  const uint16_t MQTT_PORTA   = 8883;
-  // Credencial criada em Access Management > Credentials. PREENCHA.
-  const char*    MQTT_USUARIO = "Alisson";
-  const char*    MQTT_SENHA   = "Alisson_111";
-
-  // 1 = valida o certificado do servidor (precisa colar a raiz abaixo)
-  // 0 = so cifra, sem verificar com quem esta falando. Aceitavel em bancada.
-  #define VALIDA_CERTIFICADO 0
-
-  // Raiz que assina o certificado da HiveMQ Cloud: ISRG Root X1 (Let's Encrypt).
-  // Baixe em https://letsencrypt.org/certs/isrgrootx1.pem e cole o conteudo aqui.
-  const char* CA_RAIZ = R"EOF(
------BEGIN CERTIFICATE-----
-COLE_AQUI_O_CONTEUDO_DO_isrgrootx1.pem
------END CERTIFICATE-----
-)EOF";
-
-  BearSSL::WiFiClientSecure wifiCliente;
-  BearSSL::Session          sessaoTls;  // guarda a sessao TLS para reconexoes rapidas
-#else
-  // Broker publico de teste da HiveMQ, ou o IP do PC rodando Mosquitto.
-  // NAO use "localhost": para o ESP8266, localhost e ele mesmo.
-  const char*    MQTT_HOST    = "broker.hivemq.com";
-  const uint16_t MQTT_PORTA   = 1883;
-  const char*    MQTT_USUARIO = "Alisson";   // vazio = anonimo
-  const char*    MQTT_SENHA   = "Alisson_111";
-
-  WiFiClient wifiCliente;
-#endif
-
-// No broker publico QUALQUER UM le este topico. Troque o sufixo por algo seu.
 const char* TOPICO_BASE = "cafe/teste/leitor";
-const char* FW_VERSAO   = "0.3.0";
+const char* FW_VERSAO   = "0.4.0";
 
 #define PINO_SS      D2   // GPIO4
 #define PINO_RST     D4   // GPIO2
 #define PINO_BUZZER  D1   // GPIO5
 
+#define ANTENA_PULSADA 1                 // 1 = antena so em pulsos | 0 = sempre ligada
+const unsigned long CICLO_MS = 250;      // um pulso de leitura a cada 250 ms
+const unsigned long ANTES_MS = 10;       // espera apos ligar a antena (cartao "acorda")
+
 // Mesma tag dentro desta janela = mesma passagem, nao publica de novo
 const unsigned long JANELA_REPETICAO_MS = 2000;
 // ================================================
 
-MFRC522      rfid(PINO_SS, PINO_RST);
-PubSubClient mqtt(wifiCliente);
+BearSSL::WiFiClientSecure wifiCliente;
+PubSubClient              mqtt(wifiCliente);
+MFRC522                   rfid(PINO_SS, PINO_RST);
 
 String deviceId;
 String topicoLeitura;
@@ -112,8 +77,10 @@ String topicoStatus;
 
 uint32_t      seq = 0;
 String        ultimaUid;
-unsigned long ultimaUidMs = 0;
+unsigned long ultimaUidMs         = 0;
 unsigned long ultimaTentativaMqtt = 0;
+unsigned long ultimoCiclo         = 0;
+bool          estavaConectado     = false;
 
 // ---- Fila em RAM: segura leituras enquanto o broker esta fora ----
 const int FILA_MAX = 16;
@@ -137,23 +104,14 @@ void drenaFila() {
       Serial.println("[mqtt] falha ao publicar, tenta de novo depois");
       return;
     }
-    Serial.printf("[mqtt] publicado: %s\n", fila[filaInicio].c_str());
+    Serial.printf("[mqtt] publicado da fila: %s\n", fila[filaInicio].c_str());
     fila[filaInicio] = "";
     filaInicio = (filaInicio + 1) % FILA_MAX;
     filaQtd--;
   }
 }
 
-String uidHex(const MFRC522::Uid& uid) {
-  String s;
-  for (byte i = 0; i < uid.size; i++) {
-    if (uid.uidByte[i] < 0x10) s += "0";
-    s += String(uid.uidByte[i], HEX);
-  }
-  s.toUpperCase();
-  return s;
-}
-
+// ---- Sons ----
 void bipSucesso() {
   tone(PINO_BUZZER, 2600, 100);
   delay(120);
@@ -168,8 +126,6 @@ void bipErro() {
   noTone(PINO_BUZZER);
 }
 
-// Toca quando o ESP entra no modo "portal de configuracao" de WiFi,
-// esperando alguem configurar pelo celular
 void bipModoConfig() {
   for (int i = 0; i < 3; i++) {
     tone(PINO_BUZZER, 1500, 100);
@@ -178,7 +134,6 @@ void bipModoConfig() {
   noTone(PINO_BUZZER);
 }
 
-// Toca quando conecta no WiFi com sucesso (rede salva ou recem configurada)
 void bipWifiConectado() {
   tone(PINO_BUZZER, 1800, 80);
   delay(120);
@@ -187,7 +142,6 @@ void bipWifiConectado() {
   noTone(PINO_BUZZER);
 }
 
-// Toca uma vez quando o MQTT conecta (primeira vez ou apos reconexao)
 void bipMqttConectado() {
   tone(PINO_BUZZER, 1200, 80);
   delay(100);
@@ -198,24 +152,50 @@ void bipMqttConectado() {
   noTone(PINO_BUZZER);
 }
 
-// Callback do WiFiManager: chamado assim que o portal de configuracao abre
+// ---- RFID ----
+String uidHex(const MFRC522::Uid& uid) {
+  String s;
+  for (byte i = 0; i < uid.size; i++) {
+    if (uid.uidByte[i] < 0x10) s += "0";
+    s += String(uid.uidByte[i], HEX);
+  }
+  s.toUpperCase();
+  return s;
+}
+
+// Liga a antena so pelo tempo da leitura. Retorna true se leu um cartao.
+bool lerCartao(String& uid, String& tipo) {
+#if ANTENA_PULSADA
+  rfid.PCD_AntennaOn();
+  delay(ANTES_MS);
+#endif
+  bool achou = rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial();
+  if (achou) {
+    uid  = uidHex(rfid.uid);
+    tipo = rfid.PICC_GetTypeName(rfid.PICC_GetType(rfid.uid.sak));
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+  }
+#if ANTENA_PULSADA
+  rfid.PCD_AntennaOff();
+#endif
+  return achou;
+}
+
+// ---- WiFi pelo celular (WiFiManager) ----
 void aoEntrarModoConfig(WiFiManager* wifiManager) {
-  Serial.println("[wifi] entrou em modo de configuracao, conecte-se a rede ESP8266-RFID");
+  Serial.println("[wifi] modo de configuracao: conecte o celular na rede ESP8266-RFID");
   bipModoConfig();
 }
 
-// WiFiManager e local aqui (nao mais variavel global), entao toda a
-// RAM que ele usa (servidor web, DNS, paginas HTML do portal) e
-// liberada automaticamente assim que essa funcao termina.
+// WiFiManager e local: a RAM dele e liberada assim que a funcao termina
 void conectaWifiInicial() {
   WiFiManager wm;
   wm.setAPCallback(aoEntrarModoConfig);
-  // Se ficar 3 minutos no portal sem ninguem configurar, desiste e reinicia
-  wm.setConfigPortalTimeout(180);
+  wm.setConfigPortalTimeout(180);   // 3 min sem ninguem configurar: reinicia
 
-  bool conectou = wm.autoConnect("ESP8266-RFID");
-  if (!conectou) {
-    Serial.println("Nao conectou e o portal de configuracao expirou, reiniciando...");
+  if (!wm.autoConnect("ESP8266-RFID")) {
+    Serial.println("[wifi] nao conectou e o portal expirou, reiniciando...");
     ESP.restart();
   }
 }
@@ -224,32 +204,28 @@ bool relogioSincronizado() {
   return time(nullptr) > 1700000000;
 }
 
+// ---- MQTT ----
 void conectaMqtt() {
   if (mqtt.connected() || WiFi.status() != WL_CONNECTED) return;
   if (millis() - ultimaTentativaMqtt < 3000) return;  // nao martela o broker
   ultimaTentativaMqtt = millis();
 
-#if HIVEMQ_CLOUD && VALIDA_CERTIFICADO
-  if (!relogioSincronizado()) {
-    Serial.println("[ntp] esperando o relogio sincronizar antes do TLS...");
-    return;
-  }
-#endif
+  uint32_t heap  = ESP.getFreeHeap();
+  uint32_t bloco = ESP.getMaxFreeBlockSize();
 
-  Serial.printf("[diag] heap livre: %u bytes | RSSI wifi: %d dBm\n",
-                ESP.getFreeHeap(), WiFi.RSSI());
-
-  Serial.printf("[mqtt] conectando em %s:%u ...\n", MQTT_HOST, MQTT_PORTA);
-  const char* usuario = strlen(MQTT_USUARIO) ? MQTT_USUARIO : nullptr;
-  const char* senha   = strlen(MQTT_SENHA)   ? MQTT_SENHA   : nullptr;
-
-  bool ok = mqtt.connect(deviceId.c_str(), usuario, senha,
+  unsigned long t = millis();
+  // Last Will: se o ESP cair, o proprio broker publica "offline"
+  bool ok = mqtt.connect(deviceId.c_str(), MQTT_USUARIO, MQTT_SENHA,
                          topicoStatus.c_str(), 0, true,
                          "{\"estado\":\"offline\"}");
+  unsigned long dt = millis() - t;
+
   if (!ok) {
-    Serial.printf("[mqtt] falhou, rc=%d\n", mqtt.state());
-    wifiCliente.stop();  // libera o contexto TLS parcial antes de tentar de novo
-    tone(PINO_BUZZER, 500, 60);
+    char erro[128];
+    int cod = wifiCliente.getLastSSLError(erro, sizeof(erro));
+    Serial.printf("[mqtt] FALHOU em %lu ms | rc=%d | ssl=%d (%s) | RSSI %d | heap %u, bloco %u\n",
+                  dt, mqtt.state(), cod, erro, WiFi.RSSI(), heap, bloco);
+    wifiCliente.stop();   // libera o contexto TLS parcial
     return;
   }
 
@@ -257,51 +233,42 @@ void conectaMqtt() {
   snprintf(status, sizeof(status),
            "{\"estado\":\"online\",\"ip\":\"%s\",\"fw\":\"%s\"}",
            WiFi.localIP().toString().c_str(), FW_VERSAO);
-  mqtt.publish(topicoStatus.c_str(), status, true);
-  Serial.println("[mqtt] conectado");
+  mqtt.publish(topicoStatus.c_str(), status, true);  // retained
+
+  Serial.printf("[mqtt] conectado em %lu ms | RSSI %d\n", dt, WiFi.RSSI());
   bipMqttConectado();
 }
 
 void setup() {
   Serial.begin(115200);
+  delay(300);
   pinMode(PINO_BUZZER, OUTPUT);
 
-  digitalWrite(PINO_BUZZER, HIGH);
-  delay(80);
-  digitalWrite(PINO_BUZZER, LOW);
-
   conectaWifiInicial();
-
-  Serial.println("[wifi] conectado!");
+  Serial.printf("\n[wifi] conectado | IP %s | RSSI %d dBm | antena RFID %s\n",
+                WiFi.localIP().toString().c_str(), WiFi.RSSI(),
+                ANTENA_PULSADA ? "PULSADA" : "SEMPRE LIGADA");
   bipWifiConectado();
-  Serial.printf("[diag] heap livre pos-wifi: %u bytes\n", ESP.getFreeHeap());
 
-  String mac = WiFi.macAddress();  // "24:6F:28:A1:B2:C3"
+  String mac = WiFi.macAddress();   // "24:6F:28:A1:B2:C3"
   mac.replace(":", "");
   mac.toLowerCase();
   deviceId      = "esp8266-" + mac.substring(6);
   topicoLeitura = String(TOPICO_BASE) + "/" + deviceId + "/leitura";
   topicoStatus  = String(TOPICO_BASE) + "/" + deviceId + "/status";
-  Serial.printf("\ndevice_id: %s\n", deviceId.c_str());
+  Serial.printf("device_id: %s\n", deviceId.c_str());
 
   configTime(0, 0, "a.st1.ntp.br", "pool.ntp.org");  // UTC
 
-#if HIVEMQ_CLOUD
-  #if VALIDA_CERTIFICADO
-    wifiCliente.setCACert(CA_RAIZ);
-  #else
-    wifiCliente.setInsecure();
-  #endif
-  wifiCliente.setBufferSizes(1024, 512);  // reduz de 32KB (padrao) pra 1.5KB
-  wifiCliente.setTimeout(15000); 
-  //wifiCliente.setSession(&sessaoTls);     // reconexoes reusam a sessao, ficam mais rapidas
-#endif
-
+  wifiCliente.setInsecure();   // TLS cifrado, sem validar o certificado (bancada)
   mqtt.setServer(MQTT_HOST, MQTT_PORTA);
   mqtt.setBufferSize(512);
 
-  SPI.begin();  // SCK=D5, MISO=D6, MOSI=D7 (fixos no ESP8266)
+  SPI.begin();
   rfid.PCD_Init();
+#if ANTENA_PULSADA
+  rfid.PCD_AntennaOff();
+#endif
   byte versao = rfid.PCD_ReadRegister(MFRC522::VersionReg);
   if (versao == 0x00 || versao == 0xFF) {
     Serial.println("[rfid] MFRC522 nao respondeu. Confira fiacao e alimentacao 3V3.");
@@ -309,7 +276,8 @@ void setup() {
     Serial.printf("[rfid] MFRC522 ok, versao 0x%02X\n", versao);
   }
 
-  Serial.printf("[diag] heap livre pos-setup completo: %u bytes\n", ESP.getFreeHeap());
+  Serial.printf("[diag] pos-setup: heap %u, maior bloco %u\n",
+                ESP.getFreeHeap(), ESP.getMaxFreeBlockSize());
 }
 
 void loop() {
@@ -317,16 +285,27 @@ void loop() {
   mqtt.loop();
   drenaFila();
 
-  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
-
-  String uid  = uidHex(rfid.uid);
-  String tipo = rfid.PICC_GetTypeName(rfid.PICC_GetType(rfid.uid.sak));
-  rfid.PICC_HaltA();
-  rfid.PCD_StopCrypto1();
+  bool conectado = mqtt.connected();
+  if (estavaConectado && !conectado) {
+    Serial.printf("[mqtt] conexao CAIU | rc=%d | WiFi %s | RSSI %d\n",
+                  mqtt.state(),
+                  WiFi.status() == WL_CONNECTED ? "ok" : "caiu",
+                  WiFi.RSSI());
+  }
+  estavaConectado = conectado;
 
   unsigned long agora = millis();
+#if ANTENA_PULSADA
+  if (agora - ultimoCiclo < CICLO_MS) return;
+  ultimoCiclo = agora;
+#endif
+
+  String uid, tipo;
+  if (!lerCartao(uid, tipo)) return;
+
+  agora = millis();
   if (uid == ultimaUid && agora - ultimaUidMs < JANELA_REPETICAO_MS) {
-    ultimaUidMs = agora;  // tag ainda no campo: mesma passagem
+    ultimaUidMs = agora;   // tag ainda no campo: mesma passagem
     return;
   }
   ultimaUid   = uid;
@@ -346,21 +325,14 @@ void loop() {
   Serial.println(uid);
   Serial.print("Tipo: ");
   Serial.println(tipo);
-  Serial.println("========================");
 
-  bool enviouAgora = false;
-  if (mqtt.connected()) {
-    enviouAgora = mqtt.publish(topicoLeitura.c_str(), payload);
-  }
-
-  if (enviouAgora) {
-    Serial.println("[mqtt] enviado na hora, tocando som de sucesso");
+  if (mqtt.connected() && mqtt.publish(topicoLeitura.c_str(), payload)) {
+    Serial.println("[mqtt] enviado na hora");
     bipSucesso();
   } else {
-    Serial.println("[mqtt] nao foi possivel enviar agora, tocando som de erro");
+    Serial.println("[mqtt] nao foi possivel enviar agora, guardado na fila");
     enfileira(payload);
     bipErro();
   }
-
-  drenaFila();
+  Serial.println("========================");
 }
